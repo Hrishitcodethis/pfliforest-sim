@@ -17,34 +17,84 @@ from pfliforest.server import FederatedServer
 from pfliforest.model import FederatedIsolationTree, FederatedIsolationForest
 from sklearn.ensemble import IsolationForest as SKIsolationForest
 
-def simulate_pf_liforest(X, y, n_clients=5, num_trees=25, max_depth=6, non_iid=False, rng_seed=0):
+def simulate_pf_liforest(X, y, n_clients=5, num_trees=25, max_depth=6, subsample_size=256, non_iid=False, rng_seed=0):
+    """
+    Simulate federated isolation forest.
+    
+    Args:
+        X: Feature array
+        y: Labels
+        n_clients: Number of federated clients
+        num_trees: Number of trees in forest
+        max_depth: Maximum depth of each tree
+        subsample_size: Subsample size per tree (like in standard iForest)
+        non_iid: Whether to create non-iid data distribution
+        rng_seed: Random seed
+    """
     # Partition data
     client_datas, client_labels = split_to_clients(X, y, n_clients=n_clients, non_iid=non_iid, rng_seed=rng_seed)
-    # Create client objects
-    clients = [SimClient(d, rng_seed + i) for i, d in enumerate(client_datas)]
+    
+    # Calculate subsample size per client (proportional to client data size)
+    total_samples = sum(len(cd) for cd in client_datas)
+    client_subsample_sizes = [max(2, int(subsample_size * len(cd) / total_samples)) for cd in client_datas]
+    
+    # Create client objects with subsampling
+    clients = [SimClient(d, rng_seed + i, subsample_size=ss) 
+               for i, (d, ss) in enumerate(zip(client_datas, client_subsample_sizes))]
     server = FederatedServer(client_count=len(clients))
 
     # Build forest
     trees = []
-    for t in tqdm(range(num_trees), desc="Building trees"):
+    rng = np.random.RandomState(rng_seed)
+    
+    for t in tqdm(range(num_trees), desc="Building trees", disable=False):
+        # Prepare clients for new tree (subsample if needed)
+        for c in clients:
+            c.prepare_for_tree()
+            
         splits = []
+        
         # For each depth, request splits, aggregate, distribute
         for depth in range(max_depth):
             client_layer_splits = [c.compute_layer_split() for c in clients]
-            global_split = server.aggregate_layer(client_layer_splits)
+            # Add randomness to aggregation (weighted average with noise)
+            weights = rng.dirichlet(np.ones(len(clients)))
+            global_split = float(np.average(client_layer_splits, weights=weights))
+            
             # apply global split to clients
             for c in clients:
                 c.apply_global_split(global_split)
             splits.append(global_split)
+        
+        # Collect sample data from clients for building tree structure
+        # Use a subsample to build tree representation
+        tree_sample_data = []
+        for c in clients:
+            # Get a small sample from each client
+            sample_size = min(len(c.data), max(1, subsample_size // (n_clients * 2)))
+            if sample_size > 0:
+                sample_indices = rng.choice(len(c.data), size=sample_size, replace=False)
+                tree_sample_data.extend(c.data[sample_indices])
+        
+        tree_sample_data = np.array(tree_sample_data)
+        
         # finished one tree
         for c in clients:
             c.reset_for_next_tree()
-        trees.append(FederatedIsolationTree(splits))
+        
+        # Build tree with structure
+        trees.append(FederatedIsolationTree(splits, sample_data=tree_sample_data))
 
-    # train_sample_size: aggregate of all client sizes (paper uses sample size used to train tree)
+    # Use subsample_size for normalization (standard iForest uses 256)
+    # Total sample size for reference
     train_sample_size = sum([c.get_local_sample_size() for c in clients])
 
-    forest = FederatedIsolationForest(trees, train_sample_size=train_sample_size)
+    forest = FederatedIsolationForest(
+        trees, 
+        train_sample_size=train_sample_size,
+        subsample_size=subsample_size
+    )
+    
     # Evaluate on full dataset
     scores = forest.scores(X.flatten())
     metrics = evaluate_scores(y, scores)
@@ -66,6 +116,7 @@ def run_experiments(
     n_clients_list=[3, 5],
     num_trees_list=[25, 50, 75],
     max_depth_list=[6, 8, 10],
+    subsample_size=256,  # Standard iForest subsample size
     anomaly_fraction=0.1,
     metric_to_rank="f1",
     non_iid=False,
@@ -87,6 +138,7 @@ def run_experiments(
             n_clients=n_clients,
             num_trees=num_trees,
             max_depth=max_depth,
+            subsample_size=subsample_size,
             non_iid=non_iid,
         )
 

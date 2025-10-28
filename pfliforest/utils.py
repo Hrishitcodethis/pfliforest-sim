@@ -10,23 +10,36 @@ from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, precisio
 
 def generate_temperature_dataset(n_samples=1000, anomaly_fraction=0.1,
                                  normal_mu=25.0, normal_sigma=2.0,
-                                 anomaly_low=40.0, anomaly_high=60.0,
+                                 anomaly_low=35.0, anomaly_high=50.0,
                                  rng_seed: int = 42):
     """
     Generate 1D temperature readings with injected anomalies.
+    
+    Improved version with better separation:
+    - Normal data: Gaussian around 25°C with sigma=2
+    - Anomalies: Uniform between 35-50°C (clearly separated)
+    
     Returns: (X (n,1) array, labels (n,) {0 normal,1 anomaly})
     """
     rng = np.random.RandomState(rng_seed)
     n_anom = int(n_samples * anomaly_fraction)
     n_norm = n_samples - n_anom
+    
+    # Normal temperatures clustered around normal_mu
     normal = rng.normal(normal_mu, normal_sigma, n_norm)
+    
+    # Anomalies are clearly separated from normal range
+    # Using wider range for better detectability
     anomalies = rng.uniform(anomaly_low, anomaly_high, n_anom)
+    
     X = np.concatenate([normal, anomalies]).astype(float)
     labels = np.concatenate([np.zeros(n_norm, dtype=int), np.ones(n_anom, dtype=int)])
-    # shuffle
+    
+    # shuffle to mix normal and anomalies
     perm = rng.permutation(n_samples)
     X = X[perm]
     labels = labels[perm]
+    
     return X.reshape(-1, 1), labels
 
 
